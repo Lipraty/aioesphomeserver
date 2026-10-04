@@ -83,6 +83,7 @@ class BleakBluetoothProxy(BluetoothProxy):
         self._bluez_adapter = bluez_adapter
         self._clients: dict[int, BleakClient] = {}
         self._scanner: BleakScanner | None = None
+        self._disconnect_tasks: set[asyncio.Task[None]] = set()
 
     def _scanner_for_mode(
         self,
@@ -157,10 +158,31 @@ class BleakBluetoothProxy(BluetoothProxy):
         bluez: Any = (
             {"adapter": self._bluez_adapter} if self._bluez_adapter is not None else {}
         )
-        client = BleakClient(bluetooth_address_to_str(address), bluez=bluez)
+        client = BleakClient(
+            bluetooth_address_to_str(address),
+            bluez=bluez,
+            disconnected_callback=self._on_disconnected,
+        )
         await client.connect()
         self._clients[address] = client
         return client.mtu_size
+
+    def _on_disconnected(self, client: BleakClient) -> None:
+        """Reclaim the connection slot when the peripheral drops the link."""
+        for address, known in tuple(self._clients.items()):
+            if known is client:
+                del self._clients[address]
+                break
+        else:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug("Bleak client disconnected after the event loop stopped")
+            return
+        task = loop.create_task(self.publish_disconnect(address))
+        self._disconnect_tasks.add(task)
+        task.add_done_callback(self._disconnect_tasks.discard)
 
     async def disconnect(self, address: int) -> None:
         client = self._clients.pop(address, None)

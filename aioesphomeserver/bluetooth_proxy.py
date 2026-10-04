@@ -419,16 +419,25 @@ class BluetoothProxy:
             BluetoothDeviceRequestType.CONNECT_V3_WITH_CACHE,
             BluetoothDeviceRequestType.CONNECT_V3_WITHOUT_CACHE,
         ):
-            if (
-                message.address not in self._connection_owners
-                and len(self._connection_owners) >= self.max_connections
-            ):
+            if message.address in self._connection_owners:
+                # The address is already connected, or a connection attempt is
+                # in flight; connecting again would leak the earlier handle.
                 await client.write_message(
                     BluetoothDeviceConnectionResponse(
                         address=message.address, connected=False, error=GATT_ERROR
                     )
                 )
                 return
+            if len(self._connection_owners) >= self.max_connections:
+                await client.write_message(
+                    BluetoothDeviceConnectionResponse(
+                        address=message.address, connected=False, error=GATT_ERROR
+                    )
+                )
+                return
+            # Reserve the slot before awaiting the backend so that concurrent
+            # requests cannot oversubscribe max_connections.
+            self._connection_owners[message.address] = client
             try:
                 address_type = (
                     message.address_type if message.has_address_type else 0
@@ -439,20 +448,25 @@ class BluetoothProxy:
                     request_type == BluetoothDeviceRequestType.CONNECT_V3_WITH_CACHE,
                 )
             except BluetoothProxyError as error:
+                self._connection_owners.pop(message.address, None)
                 await client.write_message(
                     BluetoothDeviceConnectionResponse(
                         address=message.address, connected=False, error=error.error
                     )
                 )
+                await self._send_connections_free()
                 return
             except Exception:
+                self._connection_owners.pop(message.address, None)
                 logger.exception("Bluetooth connection failed")
                 await client.write_message(
                     BluetoothDeviceConnectionResponse(
                         address=message.address, connected=False, error=GATT_ERROR
                     )
                 )
+                await self._send_connections_free()
                 return
+            # The backend connection is live now; keep the slot reserved.
             self._connection_owners[message.address] = client
             await client.write_message(
                 BluetoothDeviceConnectionResponse(

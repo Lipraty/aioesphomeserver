@@ -218,12 +218,18 @@ class ClimateEntity(BasicEntity):
         return json.dumps(data)
 
     async def set_state_from_command(self, command: ClimateCommandRequest) -> None:
+        # Home Assistant mirrors the advertised discovery fields, and the
+        # single-point/two-point target temperature attributes are mutually
+        # exclusive on this instance.
+        target_temperature_props = (
+            ["target_temperature_low", "target_temperature_high"]
+            if self.supports_two_point_target_temperature
+            else ["target_temperature"]
+        )
         changed = False
         for prop in [
             "mode",
-            "target_temperature",
-            "target_temperature_low",
-            "target_temperature_high",
+            *target_temperature_props,
             "fan_mode",
             "swing_mode",
             "preset",

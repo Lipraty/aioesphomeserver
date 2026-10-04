@@ -113,8 +113,14 @@ class SerialProxy:
                     if self.owner is not None and self.owner is not client:
                         raise SerialProxyError(SerialProxyStatus.PORT_IN_USE)
                     if self.owner is None:
-                        await self.on_subscribe()
+                        # Reserve the port before awaiting the backend so that
+                        # concurrent subscribers cannot both open it.
                         self.owner = client
+                        try:
+                            await self.on_subscribe()
+                        except BaseException:
+                            self.owner = None
+                            raise
                 elif kind == SerialProxyRequestType.UNSUBSCRIBE:
                     if self.owner is not client:
                         raise SerialProxyError(SerialProxyStatus.PORT_IN_USE)

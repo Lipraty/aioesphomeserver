@@ -1,8 +1,9 @@
 import asyncio
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
+import pytest
 from aioesphomeapi import APIClient
 from aioesphomeapi.api_pb2 import (
     BluetoothDeviceRequest,
@@ -21,7 +22,9 @@ from aioesphomeapi.model import (
 )
 
 from aioesphomeserver import Device, NativeApiServer
+from aioesphomeserver.native_api_server import NativeApiConnection
 from aioesphomeserver.bluetooth_proxy import (
+    GATT_ERROR,
     BluetoothAdvertisement,
     BluetoothGATTCharacteristic,
     BluetoothGATTDescriptor,
@@ -31,11 +34,17 @@ from aioesphomeserver.bluetooth_proxy import (
 
 
 class MemoryClient:
+    """Stand-in for a native API connection; the proxy only writes to it."""
+
     def __init__(self):
         self.messages = []
 
     async def write_message(self, message):
         self.messages.append(message)
+
+
+def _as_client(client: MemoryClient) -> NativeApiConnection:
+    return cast(NativeApiConnection, client)
 
 
 class MemoryProxy(BluetoothProxy):
@@ -120,6 +129,63 @@ async def _test_gatt_messages_are_translated_to_native_api_responses():
         client, BluetoothGATTReadRequest(address=address, handle=2)
     )
     assert client.messages[-1].data == b"ok"
+
+
+class SlowConnectProxy(BluetoothProxy):
+    """Keep a connect request pending until the test releases it."""
+
+    def __init__(self) -> None:
+        super().__init__(max_connections=1)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.connected: set[int] = set()
+
+    async def connect(self, address: int, address_type: int, use_cache: bool) -> int:
+        self.started.set()
+        await self.release.wait()
+        self.connected.add(address)
+        return 247
+
+
+def _connect_request(address: int) -> BluetoothDeviceRequest:
+    return BluetoothDeviceRequest(
+        address=address,
+        request_type=BluetoothDeviceRequestType.CONNECT_V3_WITHOUT_CACHE,
+        has_address_type=True,
+        address_type=0,
+    )
+
+
+def test_concurrent_connects_do_not_oversubscribe_max_connections() -> None:
+    asyncio.run(_test_concurrent_connects_do_not_oversubscribe_max_connections())
+
+
+async def _test_concurrent_connects_do_not_oversubscribe_max_connections() -> None:
+    proxy = SlowConnectProxy()
+    first, second, duplicate = MemoryClient(), MemoryClient(), MemoryClient()
+    address = 0xAABBCCDDEE01
+
+    pending = asyncio.create_task(
+        proxy.handle_api_message(_as_client(first), _connect_request(address))
+    )
+    await proxy.started.wait()
+
+    # The slot is reserved while the backend is still connecting.
+    async with asyncio.timeout(2):
+        await proxy.handle_api_message(_as_client(second), _connect_request(0xAABBCCDDEE02))
+    assert second.messages[-1].connected is False
+    assert second.messages[-1].error == GATT_ERROR
+
+    # A second request for the same address must not replace the reservation.
+    async with asyncio.timeout(2):
+        await proxy.handle_api_message(_as_client(duplicate), _connect_request(address))
+    assert duplicate.messages[-1].connected is False
+    assert proxy.connected == set()
+
+    proxy.release.set()
+    await pending
+    assert first.messages[-1].connected is True
+    assert proxy.connected == {address}
 
 
 def test_official_client_can_register_bluetooth_scanner() -> None:
@@ -233,6 +299,7 @@ def test_bluetooth_proxy_device_info_has_stable_fallback_identity() -> None:
 
 
 def test_bleak_example_restores_runtime_scan_mode_support() -> None:
+    pytest.importorskip("bleak")
     from examples.bleak_proxy import BleakBluetoothProxy
 
     proxy = BleakBluetoothProxy()
@@ -245,6 +312,7 @@ def test_bleak_example_restores_runtime_scan_mode_support() -> None:
 
 
 def test_bleak_example_device_exposes_diagnostics_and_bluetooth_info() -> None:
+    pytest.importorskip("bleak")
     async def run() -> None:
         from examples.bleak_proxy import build_device
 
@@ -314,6 +382,7 @@ def test_bleak_example_device_exposes_diagnostics_and_bluetooth_info() -> None:
 
 
 def test_bleak_example_reads_cpu_temperature_zone(tmp_path: Path) -> None:
+    pytest.importorskip("bleak")
     from examples.bleak_proxy import (
         _cpu_temperature_path,
         _gpu_temperature_path,
@@ -350,6 +419,7 @@ def test_bluetooth_proxy_normalizes_and_validates_adapter_mac() -> None:
 
 
 def test_bleak_example_maps_bluez_random_address_type() -> None:
+    pytest.importorskip("bleak")
     from bleak.backends.scanner import AdvertisementData
 
     from examples.bleak_proxy import _address_type
@@ -371,6 +441,7 @@ def test_bleak_example_maps_bluez_random_address_type() -> None:
 
 
 def test_bleak_example_fallback_identities_are_stable_and_distinct() -> None:
+    pytest.importorskip("bleak")
     from examples.bleak_proxy import _stable_host_mac
 
     device_mac = _stable_host_mac("esphome:bleak-bluetooth-proxy")
@@ -381,6 +452,7 @@ def test_bleak_example_fallback_identities_are_stable_and_distinct() -> None:
 
 
 def test_bleak_example_passive_scan_uses_bluez_patterns_and_falls_back() -> None:
+    pytest.importorskip("bleak")
     from bleak import BleakError
 
     from examples.bleak_proxy import BleakBluetoothProxy
@@ -418,5 +490,50 @@ def test_bleak_example_passive_scan_uses_bluez_patterns_and_falls_back() -> None
         assert active.kwargs["scanning_mode"] == "active"
         assert active.started is True
         await proxy.stop_scan()
+
+    asyncio.run(run())
+
+
+def test_bleak_example_reports_backend_disconnects() -> None:
+    pytest.importorskip("bleak")
+
+    from examples.bleak_proxy import BleakBluetoothProxy
+
+    class FakeBleakClient:
+        instances: list["FakeBleakClient"] = []
+
+        def __init__(self, address: str, **kwargs: Any) -> None:
+            self.address = address
+            self.kwargs = kwargs
+            self.mtu_size = 247
+            self.__class__.instances.append(self)
+
+        async def connect(self) -> None:
+            pass
+
+        async def disconnect(self) -> None:
+            pass
+
+    async def run() -> None:
+        address = 0xAABBCCDDEE03
+        proxy = BleakBluetoothProxy()
+        with patch("examples.bleak_proxy.BleakClient", FakeBleakClient):
+            owner = MemoryClient()
+            await proxy.handle_api_message(_as_client(owner), _connect_request(address))
+            assert owner.messages[-1].connected is True
+
+            # The peripheral drops the link on its own; Bleak reports it
+            # through the callback the proxy registered.
+            client = FakeBleakClient.instances[-1]
+            client.kwargs["disconnected_callback"](client)
+            async with asyncio.timeout(2):
+                while owner.messages[-1].connected:
+                    await asyncio.sleep(0)
+
+            # Home Assistant can connect the address again.
+            second = MemoryClient()
+            await proxy.handle_api_message(_as_client(second), _connect_request(address))
+            assert second.messages[-1].connected is True
+            assert len(FakeBleakClient.instances) == 2
 
     asyncio.run(run())

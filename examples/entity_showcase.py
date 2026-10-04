@@ -10,7 +10,7 @@ from aioesphomeapi import (
     ClimateMode,
     ClimatePreset,
     ClimateSwingMode,
-    LightColorCapability,
+    ColorMode,
 )
 from aioesphomeapi.api_pb2 import AreaInfo, DeviceInfo
 from aioesphomeapi.model import (
@@ -243,11 +243,8 @@ def build_device() -> tuple[Device, dict[str, BasicEntity]]:
             name="Desk light",
             object_id="desk_light",
             color_modes=(
-                LightColorCapability.ON_OFF
-                | LightColorCapability.BRIGHTNESS
-                | LightColorCapability.RGB,
-                LightColorCapability.BRIGHTNESS
-                | LightColorCapability.COLOR_TEMPERATURE,
+                ColorMode.RGB,
+                ColorMode.COLOR_TEMPERATURE,
             ),
             min_mireds=153.0,
             max_mireds=500.0,

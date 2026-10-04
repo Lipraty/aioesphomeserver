@@ -1,7 +1,7 @@
 import asyncio
 from typing import Any
 
-from aioesphomeapi import LightColorCapability
+from aioesphomeapi import ColorMode
 
 from aioesphomeserver.binary_sensor import BinarySensorEntity
 from aioesphomeserver.device import Device
@@ -52,10 +52,7 @@ if __name__ == "__main__":
             name="Text Light",
             effects=["Foo", "Bar", "Sparkle"],
             color_modes=[
-                LightColorCapability.ON_OFF
-                | LightColorCapability.BRIGHTNESS
-                | LightColorCapability.RGB
-                | LightColorCapability.WHITE
+                ColorMode.RGB_WHITE,
             ],
         )
     )

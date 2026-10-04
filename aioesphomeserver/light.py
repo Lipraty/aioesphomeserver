@@ -7,7 +7,7 @@ from operator import ior
 from typing import Any
 from urllib import parse
 
-from aioesphomeapi import LightColorCapability
+from aioesphomeapi import ColorMode
 from aioesphomeapi.api_pb2 import (
     LightCommandRequest,  # type: ignore
     LightStateResponse,
@@ -24,7 +24,7 @@ class LightEntity(BasicEntity):
     def __init__(
         self,
         *args: Any,
-        color_modes: Sequence[int] = (LightColorCapability.ON_OFF,),
+        color_modes: Sequence[ColorMode] = (ColorMode.ON_OFF,),
         effects: Sequence[str] | None = None,
         min_mireds: float = 0.0,
         max_mireds: float = 0.0,
@@ -32,7 +32,9 @@ class LightEntity(BasicEntity):
     ) -> None:
         super().__init__(*args, **kwargs)
 
-        self.supported_color_modes = color_modes
+        self.supported_color_modes = tuple(ColorMode(mode) for mode in color_modes)
+        if not self.supported_color_modes:
+            raise ValueError("color_modes must contain at least one ColorMode")
         self.min_mireds = float(min_mireds)
         self.max_mireds = float(max_mireds)
         if effects == None:
@@ -50,7 +52,7 @@ class LightEntity(BasicEntity):
         self.warm_white = 1.0
         self.transition_length = 0
         self.flash_length = 0
-        self.color_mode = color_modes[0]
+        self.color_mode = self.supported_color_modes[0]
         self.red = 1.0
         self.green = 1.0
         self.blue = 1.0

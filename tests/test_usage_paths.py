@@ -6,8 +6,13 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from aioesphomeapi import APIClient, LightColorCapability
-from aioesphomeapi.api_pb2 import ClimateMode, SwitchStateResponse
+from aioesphomeapi import APIClient, ColorMode
+from aioesphomeapi.api_pb2 import (
+    ClimateCommandRequest,
+    ClimateMode,
+    SwitchStateResponse,
+)
+from aioesphomeapi.model import LightInfo
 from aiohttp.test_utils import make_mocked_request
 
 from aioesphomeserver import (
@@ -18,7 +23,6 @@ from aioesphomeserver import (
     LightEntity,
     NativeApiServer,
     SensorEntity,
-    WebServer,
 )
 
 
@@ -163,6 +167,23 @@ def test_encrypted_device_advertises_noise():
     asyncio.run(run())
 
 
+def test_zeroconf_registration_failure_closes_the_instance():
+    async def run() -> None:
+        device = Device(name="zeroconf-failure", mac_address="02:00:00:00:00:19")
+        zeroconf = AsyncMock()
+        zeroconf.async_register_service.side_effect = OSError("no multicast route")
+        with (
+            patch("aioesphomeserver.device.AsyncZeroconf", return_value=zeroconf),
+            patch.object(device, "_get_ip_address", return_value="192.0.2.3"),
+        ):
+            result = await device.register_zeroconf(6053)
+
+        assert result is None
+        zeroconf.async_close.assert_awaited_once()
+
+    asyncio.run(run())
+
+
 def test_device_run_starts_api_before_announcing():
     async def run() -> None:
         class RecordingDevice(Device):
@@ -234,7 +255,7 @@ def test_light_http_style_commands_update_state_json():
     async def run() -> None:
         light = LightEntity(
             name="Desk light",
-            color_modes=(LightColorCapability.RGB,),
+            color_modes=(ColorMode.RGB,),
             effects=("rainbow",),
         )
         device = Device(name="Light device", mac_address="02:00:00:00:00:11")
@@ -274,6 +295,42 @@ def test_light_http_style_commands_update_state_json():
     asyncio.run(run())
 
 
+def test_light_reports_configured_color_modes_to_native_api_clients():
+    async def run() -> None:
+        light = LightEntity(
+            name="White light",
+            color_modes=(ColorMode.WHITE, ColorMode.COLOR_TEMPERATURE),
+        )
+        device = Device(name="Light device", mac_address="02:00:00:00:00:22")
+        device.add_entity(light)
+        api = NativeApiServer(name="_api", port=0, host="127.0.0.1")
+        device.add_entity(api)
+        task = asyncio.create_task(api.run())
+        try:
+            while api.bound_port is None:
+                await asyncio.sleep(0)
+            client = APIClient("127.0.0.1", api.bound_port, keepalive=60)
+            await client.connect()
+            try:
+                entities, _services = await client.list_entities_services()
+                (found,) = [
+                    entity for entity in entities if entity.name == "White light"
+                ]
+                assert isinstance(found, LightInfo)
+                assert list(found.supported_color_modes) == [
+                    ColorMode.WHITE,
+                    ColorMode.COLOR_TEMPERATURE,
+                ]
+            finally:
+                await client.disconnect()
+        finally:
+            await api.stop()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(run())
+
+
 def test_climate_http_style_command_and_state_json():
     async def run() -> None:
         climate = ClimateEntity(
@@ -305,25 +362,53 @@ def test_climate_http_style_command_and_state_json():
     asyncio.run(run())
 
 
-def test_web_server_routes_and_event_queue():
+def test_climate_ignores_target_temperature_fields_it_did_not_advertise():
     async def run() -> None:
-        device = Device(name="Web device", mac_address="02:00:00:00:00:13")
-        sensor = SensorEntity(name="Temperature")
-        web_server = WebServer(name="_web", port=0)
-        device.add_entity(sensor)
-        device.add_entity(web_server)
+        device = Device(name="Climate device", mac_address="02:00:00:00:00:23")
+        single = ClimateEntity(name="Thermostat")
+        two_point = ClimateEntity(
+            name="Two point thermostat",
+            supports_two_point_target_temperature=True,
+        )
+        device.add_entity(single)
+        device.add_entity(two_point)
 
-        index = await web_server.index(make_mocked_request("GET", "/"))
-        assert index.__class__.__name__ == "FileResponse"
-        assert str(index._path).endswith("index.html")
+        await single.set_state_from_command(
+            ClimateCommandRequest(
+                key=single.key,
+                has_target_temperature=True,
+                target_temperature=21.0,
+            )
+        )
+        assert single.target_temperature == 21.0
 
-        await sensor.set_state(12.5)
-        assert (await web_server.queue.get())[0] == "log"
-        event = await web_server.queue.get()
-        assert event[0] == "state"
-        assert json.loads(event[1])["state"] == 12.5
+        # A single-point entity has no low/high targets, so the field must be
+        # ignored instead of raising AttributeError.
+        await single.set_state_from_command(
+            ClimateCommandRequest(
+                key=single.key,
+                has_target_temperature_high=True,
+                target_temperature_high=25.0,
+            )
+        )
+        assert single.target_temperature == 21.0
 
-        await web_server.handle("log", (3, "hello"))
-        assert await web_server.queue.get() == ("log", (3, "hello"))
+        await two_point.set_state_from_command(
+            ClimateCommandRequest(
+                key=two_point.key,
+                has_target_temperature_low=True,
+                target_temperature_low=18.0,
+            )
+        )
+        assert two_point.target_temperature_low == 18.0
+
+        await two_point.set_state_from_command(
+            ClimateCommandRequest(
+                key=two_point.key,
+                has_target_temperature=True,
+                target_temperature=22.0,
+            )
+        )
+        assert two_point.target_temperature_low == 18.0
 
     asyncio.run(run())

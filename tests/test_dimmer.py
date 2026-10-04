@@ -6,7 +6,7 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from aioesphomeapi import LightColorCapability
+from aioesphomeapi import ColorMode
 
 from aioesphomeserver import Device, LightCommandRequest, LightEntity
 
@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO)
 
 class RandomDimmer(LightEntity):
     def __init__(self, name):
-        super().__init__(name=name, color_modes=[LightColorCapability.BRIGHTNESS])
+        super().__init__(name=name, color_modes=[ColorMode.BRIGHTNESS])
 
     async def random_dimmer(self):
         while True:
