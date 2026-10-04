@@ -32,9 +32,16 @@ class LightEntity(BasicEntity):
     ) -> None:
         super().__init__(*args, **kwargs)
 
-        self.supported_color_modes = tuple(ColorMode(mode) for mode in color_modes)
-        if not self.supported_color_modes:
+        if not color_modes:
             raise ValueError("color_modes must contain at least one ColorMode")
+        for mode in color_modes:
+            if not isinstance(mode, ColorMode):
+                raise ValueError(
+                    f"color_modes entries must be ColorMode values, got {mode!r}"
+                )
+            if mode == ColorMode.UNKNOWN:
+                raise ValueError("color_modes must not contain ColorMode.UNKNOWN")
+        self.supported_color_modes = tuple(color_modes)
         self.min_mireds = float(min_mireds)
         self.max_mireds = float(max_mireds)
         if effects == None:

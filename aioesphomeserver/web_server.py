@@ -9,6 +9,10 @@ from aiohttp_sse import sse_response
 
 from aioesphomeserver.basic_entity import BasicEntity
 
+# A dashboard that stops reading must not grow the server without bound; the
+# oldest event is dropped once this many are pending for one connection.
+MAX_PENDING_EVENTS = 64
+
 
 class WebServer(BasicEntity):
     def __init__(self, *args: Any, port: int = 8080, **kwargs: Any) -> None:
@@ -23,6 +27,8 @@ class WebServer(BasicEntity):
 
     def _broadcast(self, event: tuple[str, Any]) -> None:
         for queue in tuple(self._subscribers):
+            if queue.full():
+                queue.get_nowait()
             queue.put_nowait(event)
 
     async def handle(self, key: str, message: Any) -> None:
@@ -45,7 +51,9 @@ class WebServer(BasicEntity):
         device = self.device
         if device is None:
             raise RuntimeError("web server is not attached to a device")
-        queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+        queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(
+            maxsize=MAX_PENDING_EVENTS
+        )
         async with sse_response(request) as resp:
             self._subscribers.add(queue)
             try:

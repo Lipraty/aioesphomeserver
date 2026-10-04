@@ -3,7 +3,6 @@
 import asyncio
 import contextlib
 import json
-import socket
 from collections.abc import AsyncIterator
 
 import aiohttp
@@ -12,21 +11,23 @@ import pytest
 from aioesphomeserver import Device, SensorEntity, WebServer
 
 
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-async def _wait_until_listening(port: int) -> None:
-    async with asyncio.timeout(5):
-        async with aiohttp.ClientSession() as session:
-            while True:
-                try:
-                    async with session.get(f"http://127.0.0.1:{port}/"):
-                        return
-                except aiohttp.ClientError:
-                    await asyncio.sleep(0.05)
+async def _start_dashboard() -> tuple[Device, SensorEntity, WebServer, int, asyncio.Task]:
+    device = Device(name="dashboard-device", mac_address="02:00:00:00:00:20")
+    sensor = SensorEntity(name="Temperature")
+    web_server = WebServer(name="_web", port=0)
+    device.add_entity(sensor)
+    device.add_entity(web_server)
+    task = asyncio.create_task(web_server.run())
+    try:
+        # The dashboard binds an OS assigned port; wait for it to be known.
+        async with asyncio.timeout(5):
+            while not web_server.port:
+                await asyncio.sleep(0.01)
+    except BaseException:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+    return device, sensor, web_server, web_server.port, task
 
 
 async def _next_frame(response: aiohttp.ClientResponse) -> tuple[str, str]:
@@ -57,23 +58,6 @@ async def _next_event(
         event, data = await _next_frame(response)
         if event == event_name:
             return event, data
-
-
-async def _start_dashboard() -> tuple[Device, SensorEntity, WebServer, int, asyncio.Task]:
-    device = Device(name="dashboard-device", mac_address="02:00:00:00:00:20")
-    sensor = SensorEntity(name="Temperature")
-    port = _free_port()
-    web_server = WebServer(name="_web", port=port)
-    device.add_entity(sensor)
-    device.add_entity(web_server)
-    task = asyncio.create_task(web_server.run())
-    try:
-        await _wait_until_listening(port)
-    except BaseException:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        raise
-    return device, sensor, web_server, port, task
 
 
 @contextlib.asynccontextmanager

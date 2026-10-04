@@ -438,6 +438,7 @@ class BluetoothProxy:
             # Reserve the slot before awaiting the backend so that concurrent
             # requests cannot oversubscribe max_connections.
             self._connection_owners[message.address] = client
+            await self._send_connections_free()
             try:
                 address_type = (
                     message.address_type if message.has_address_type else 0
@@ -466,6 +467,10 @@ class BluetoothProxy:
                 )
                 await self._send_connections_free()
                 return
+            except BaseException:
+                # A cancelled request must not keep the reserved slot.
+                self._connection_owners.pop(message.address, None)
+                raise
             # The backend connection is live now; keep the slot reserved.
             self._connection_owners[message.address] = client
             await client.write_message(

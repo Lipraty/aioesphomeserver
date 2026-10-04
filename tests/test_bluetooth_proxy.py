@@ -168,7 +168,8 @@ async def _test_concurrent_connects_do_not_oversubscribe_max_connections() -> No
     pending = asyncio.create_task(
         proxy.handle_api_message(_as_client(first), _connect_request(address))
     )
-    await proxy.started.wait()
+    async with asyncio.timeout(2):
+        await proxy.started.wait()
 
     # The slot is reserved while the backend is still connecting.
     async with asyncio.timeout(2):
@@ -186,6 +187,30 @@ async def _test_concurrent_connects_do_not_oversubscribe_max_connections() -> No
     await pending
     assert first.messages[-1].connected is True
     assert proxy.connected == {address}
+
+
+def test_a_cancelled_connect_releases_the_reserved_slot() -> None:
+    async def run() -> None:
+        proxy = SlowConnectProxy()
+        address = 0xAABBCCDDEE05
+        first = MemoryClient()
+
+        pending = asyncio.create_task(
+            proxy.handle_api_message(_as_client(first), _connect_request(address))
+        )
+        async with asyncio.timeout(2):
+            await proxy.started.wait()
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+
+        # The cancelled request must not hold the only connection slot.
+        proxy.release.set()
+        second = MemoryClient()
+        await proxy.handle_api_message(_as_client(second), _connect_request(address))
+        assert second.messages[-1].connected is True
+        assert proxy.connected == {address}
+
+    asyncio.run(run())
 
 
 def test_official_client_can_register_bluetooth_scanner() -> None:
@@ -501,18 +526,20 @@ def test_bleak_example_reports_backend_disconnects() -> None:
 
     class FakeBleakClient:
         instances: list["FakeBleakClient"] = []
+        is_connected = True
 
         def __init__(self, address: str, **kwargs: Any) -> None:
             self.address = address
             self.kwargs = kwargs
             self.mtu_size = 247
+            self.is_connected = True
             self.__class__.instances.append(self)
 
         async def connect(self) -> None:
             pass
 
         async def disconnect(self) -> None:
-            pass
+            self.is_connected = False
 
     async def run() -> None:
         address = 0xAABBCCDDEE03
@@ -535,5 +562,48 @@ def test_bleak_example_reports_backend_disconnects() -> None:
             await proxy.handle_api_message(_as_client(second), _connect_request(address))
             assert second.messages[-1].connected is True
             assert len(FakeBleakClient.instances) == 2
+
+    asyncio.run(run())
+
+
+def test_bleak_example_drops_a_connection_lost_during_the_handshake() -> None:
+    pytest.importorskip("bleak")
+
+    from examples.bleak_proxy import BleakBluetoothProxy
+
+    class FlakyBleakClient:
+        instances: list["FlakyBleakClient"] = []
+
+        def __init__(self, address: str, **kwargs: Any) -> None:
+            self.address = address
+            self.kwargs = kwargs
+            self.mtu_size = 247
+            self.is_connected = False
+            self.__class__.instances.append(self)
+
+        async def connect(self) -> None:
+            # Only the first handshake loses the link.
+            self.is_connected = len(self.__class__.instances) > 1
+
+        async def disconnect(self) -> None:
+            self.is_connected = False
+
+    async def run() -> None:
+        address = 0xAABBCCDDEE06
+        proxy = BleakBluetoothProxy()
+        with patch("examples.bleak_proxy.BleakClient", FlakyBleakClient):
+            first = MemoryClient()
+            await proxy.handle_api_message(
+                _as_client(first), _connect_request(address)
+            )
+            assert first.messages[-1].connected is False
+
+            # The next attempt is not blocked by the failed handshake.
+            second = MemoryClient()
+            await proxy.handle_api_message(
+                _as_client(second), _connect_request(address)
+            )
+            assert second.messages[-1].connected is True
+            assert len(FlakyBleakClient.instances) == 2
 
     asyncio.run(run())

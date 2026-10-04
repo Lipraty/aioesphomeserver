@@ -34,11 +34,13 @@ from bleak.backends.scanner import AdvertisementData
 
 import aioesphomeserver
 from aioesphomeserver import (
+    GATT_ERROR,
     BluetoothAdvertisement,
     BluetoothGATTCharacteristic,
     BluetoothGATTDescriptor,
     BluetoothGATTService,
     BluetoothProxy,
+    BluetoothProxyError,
     Device,
     SensorEntity,
     TextSensorEntity,
@@ -163,8 +165,19 @@ class BleakBluetoothProxy(BluetoothProxy):
             bluez=bluez,
             disconnected_callback=self._on_disconnected,
         )
-        await client.connect()
+        # Register before the handshake so a disconnect callback that fires
+        # while it runs can find and drop this client.
         self._clients[address] = client
+        try:
+            await client.connect()
+        except BaseException:
+            if self._clients.get(address) is client:
+                del self._clients[address]
+            raise
+        if not client.is_connected:
+            # The peripheral dropped the link while the handshake ran.
+            self._clients.pop(address, None)
+            raise BluetoothProxyError(GATT_ERROR, "disconnected during connect")
         return client.mtu_size
 
     def _on_disconnected(self, client: BleakClient) -> None:

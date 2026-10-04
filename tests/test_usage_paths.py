@@ -307,9 +307,10 @@ def test_light_reports_configured_color_modes_to_native_api_clients():
         device.add_entity(api)
         task = asyncio.create_task(api.run())
         try:
-            while api.bound_port is None:
-                await asyncio.sleep(0)
-            client = APIClient("127.0.0.1", api.bound_port, keepalive=60)
+            await asyncio.wait_for(api.wait_started(), timeout=5)
+            port = api.bound_port
+            assert port is not None
+            client = APIClient("127.0.0.1", port, keepalive=60)
             await client.connect()
             try:
                 entities, _services = await client.list_entities_services()

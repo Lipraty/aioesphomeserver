@@ -51,7 +51,8 @@ def test_one_subscriber_opens_the_port_and_others_are_rejected():
         pending = asyncio.create_task(
             proxy.handle_message(_as_client(first), _subscribe())
         )
-        await proxy.started.wait()
+        async with asyncio.timeout(2):
+            await proxy.started.wait()
 
         # The port is already taken while the first client is still being
         # served, so the second subscriber must be rejected.
@@ -69,5 +70,33 @@ def test_one_subscriber_opens_the_port_and_others_are_rejected():
         await proxy.handle_message(_as_client(third), _subscribe())
         assert third.messages[-1].status == SerialProxyStatus.OK
         assert proxy.opened == 2
+
+    asyncio.run(run())
+
+
+class FlakyProxy(SerialProxy):
+    """Fail the first attempt to open the port, then work."""
+
+    def __init__(self) -> None:
+        super().__init__("UART")
+        self.fail_next = True
+
+    async def on_subscribe(self) -> None:
+        if self.fail_next:
+            self.fail_next = False
+            raise RuntimeError("the port is gone")
+
+
+def test_a_failed_backend_open_does_not_strand_the_port():
+    async def run() -> None:
+        proxy = FlakyProxy()
+        first, second = MemoryClient(), MemoryClient()
+
+        await proxy.handle_message(_as_client(first), _subscribe())
+        assert first.messages[-1].status == SerialProxyStatus.ERROR
+
+        # The failed attempt must not keep the port for itself.
+        await proxy.handle_message(_as_client(second), _subscribe())
+        assert second.messages[-1].status == SerialProxyStatus.OK
 
     asyncio.run(run())
